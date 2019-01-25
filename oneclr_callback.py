@@ -30,45 +30,37 @@ class OneCyclicLR(Callback):
     modified from  https://github.com/bckenstler/CLR
     
     from original paper https://arxiv.org/abs/1708.07120 : 
-    Here we suggest a slight modification of cyclical learning rate policy for 
-    super-convergence; always use one cycle that is smaller than the total number of 
-    iterations/epochs and allow the learning rate to decrease several orders of magnitude 
-    less than the initial learning rate for the remaining iterations.
+      Here we suggest a slight modification of cyclical learning rate policy for 
+      super-convergence; always use one cycle that is smaller than the total number of 
+      iterations/epochs and allow the learning rate to decrease several orders of magnitude 
+      less than the initial learning rate for the remaining iterations.
     
-    LN Smith's reply in fastai forum
-    https://forums.fast.ai/t/research-paper-recommendations/13768/27
-    I am sorry for the confusion on the 1cycle policy. It is one cycle but I let the cycle 
-    end a little bit before the end of training (and keep the learning rate constant at 
-    the smallest value) to allow the weights to settle into the local minima.
     
-    however this modification is different, the cycle is still triangular but every iteration
-    afterwards are const learning rate. so please use one epoch (or more) than a full cycle.
+    LN Smith's reply in fastai forum 
+    https://forums.fast.ai/t/research-paper-recommendations/13768/27  :
+      I am sorry for the confusion on the 1cycle policy. It is one cycle but I let the cycle 
+      end a little bit before the end of training (and keep the learning rate constant at 
+      the smallest value) to allow the weights to settle into the local minima.
+    
     
     #lr vs iteration
     #
-    #   -             <- max_lr
-    #  - -
-    # -   -
-    #-     -          <- base_lr
-    #       
-    #       --------  <- settle_lr
-    #      ^last iteration of 1 cycle
-          
+    #   ----             <- max_lr
+    #  -    -
+    # -      -
+    #-        -          <- base_lr
+    #          -
+    #           --------  <- settle_lr
+    #   
+    #< a><b ><c ><  d  > 
+    #a:step_up , b:step_max, c:step_down, d:step_settle
     
     This callback implements a cyclical learning rate policy (CLR).
     The method cycles the learning rate between two boundaries with
     some constant frequency, as detailed in this paper (https://arxiv.org/abs/1506.01186).
     The amplitude of the cycle can be scaled on a per-iteration or 
     per-cycle basis.
-    This class has three built-in policies, as put forth in the paper.
-    "triangular":
-        A basic triangular cycle w/ no amplitude scaling.
-    "triangular2":
-        A basic triangular cycle that scales initial amplitude by half each cycle.
-    "exp_range":
-        A cycle that scales initial amplitude by gamma**(cycle iterations) at each 
-        cycle iteration.
-    For more detail, please see paper.
+    
     
     # Example
         ```python
@@ -79,14 +71,7 @@ class OneCyclicLR(Callback):
             
         ```
     
-    Class also supports custom scaling functions:
-        ```python
-            clr_fn = lambda x: 0.5*(1+np.sin(x*np.pi/2.))
-            clr = CyclicLR(base_lr=0.001, max_lr=0.006,
-                                step_size=2000., scale_fn=clr_fn,
-                                scale_mode='cycle')
-            model.fit(X_train, Y_train, callbacks=[clr])
-        ```    
+
     # Arguments
         base_lr: initial learning rate which is the
             lower boundary in the cycle.
@@ -99,20 +84,10 @@ class OneCyclicLR(Callback):
         step_size: number of training iterations per
             half cycle. Authors suggest setting step_size
             2-8 x training iterations in epoch.
-        mode: one of {triangular, triangular2, exp_range}.
-            Default 'triangular'.
-            Values correspond to policies detailed above.
-            If scale_fn is not None, this argument is ignored.
-        gamma: constant in 'exp_range' scaling function:
-            gamma**(cycle iterations)
-        scale_fn: Custom scaling policy defined by a single
-            argument lambda function, where 
-            0 <= scale_fn(x) <= 1 for all x >= 0.
-            mode paramater is ignored 
-        scale_mode: {'cycle', 'iterations'}.
-            Defines whether scale_fn is evaluated on 
-            cycle number or cycle iterations (training
-            iterations since start of cycle). Default is 'cycle'.
+
+        step_settle: number of training iterations used in 
+            settle_lr in the down step: the down step_size
+            is step_size - step_settle
             
         settle_lr: learning rate after certain iteration/cycle,
             should be 'several orders less than base_lr, 
@@ -120,38 +95,39 @@ class OneCyclicLR(Callback):
         settle_itertion: after this iteration, lr is settle_lr(const)
     """
 
-    def __init__(self, base_lr=0.001, max_lr=0.006, step_size=2000., mode='triangular',
-                 gamma=1., settle_cycle = 1, settle_iteration = 4000, settle_lr = 0.00001, scale_mode='cycle'):
+    def __init__(self, base_lr=0.001, max_lr=0.006, settle_lr = 0.00001,
+                step_size=2000., step_max = 0, step_settle = 0, step_down = None ):
         super(OneCyclicLR, self).__init__()
 
+        if step_size <=0:
+            raise Exception("step_size <=0")
+        if step_max < 0 :
+            raise Exception("step_max < 0")
+        if step_settle > step_size :
+            raise Exception("step_settle > step_size")
+        if step_settle < 0 :
+            raise Exception ("step_settle < 0")
+            
+           
+            
         self.base_lr = base_lr
         self.max_lr = max_lr
-        self.step_size = step_size
-        self.mode = mode
-        self.gamma = gamma
-        self.settle_cycle = settle_cycle # after this cycle , lr is settle_lr(const)
-        self.settle_iteration = settle_iteration #after this iteration, lr is settle_lr(const)
         self.settle_lr = settle_lr 
         
-        if True:
-            if self.mode == 'triangular':
-                self.scale_fn = lambda x: 1.
-        
-            elif self.mode == 'triangular2':
-                self.scale_fn = lambda x: 1/(2.**(x-1))
-        
-            elif self.mode == 'exp_range':
-                self.scale_fn = lambda x: gamma**(x)
-        self.scale_mode = scale_mode
-        
+        self.step_size = step_size
+        self.step_up = step_size
+        self.step_max = step_max
+        if step_down is None:
+            self.step_down = step_size - step_settle
+        else:
+            self.step_down = step_down
         self.clr_iterations = 0.
         self.trn_iterations = 0.
         self.history = {}
 
         self._reset()
 
-    def _reset(self, new_base_lr=None, new_max_lr=None,
-               new_step_size=None):
+    def _reset(self, new_base_lr=None, new_max_lr=None, new_settle_lr = None, new_step_size=None):
         """Resets cycle iterations.
         Optional boundary/step size adjustment.
         """
@@ -159,24 +135,29 @@ class OneCyclicLR(Callback):
             self.base_lr = new_base_lr
         if new_max_lr != None:
             self.max_lr = new_max_lr
+        if new_settle_lr != None:
+            self.settle_lr = new_settle_lr
         if new_step_size != None:
             self.step_size = new_step_size
         self.clr_iterations = 0.
         
     def clr(self):
-        cycle = np.floor(1+self.clr_iterations/(2*self.step_size))
-        x = np.abs(self.clr_iterations/self.step_size - 2*cycle + 1)
-        if self.scale_mode == 'cycle':
-            if cycle > self.settle_cycle:
-                
-                return self.settle_lr
-            else:
-                return self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(cycle)
+        cycle = np.floor(1+self.clr_iterations/(2*self.step_size)) #number of cycle
+        x = np.abs(self.clr_iterations/self.step_size - 2*cycle + 1) 
+        
+        if self.clr_iterations <= self.step_up:
+            return self.base_lr + (self.max_lr-self.base_lr) * (self.clr_iterations/self.step_up)
+            
+        elif self.clr_iterations <= self.step_up + self.step_max:
+            return self.max_lr
+            
+        elif self.clr_iterations <= self.step_up + self.step_max + self.step_down:
+            x = np.abs((self.clr_iterations - self.step_up - self.step_max)/self.step_down -1)
+            return self.settle_lr + (self.max_lr-self.settle_lr) * np.maximum(0, x)
+            
         else:
-            if x > self.settle_iteration:
-                return self.settle_lr
-            else:
-                return self.base_lr + (self.max_lr-self.base_lr)*np.maximum(0, (1-x))*self.scale_fn(self.clr_iterations)
+            #all extra iterations will be at settle_lr
+            return self.settle_lr
         
     def on_train_begin(self, logs={}):
         logs = logs or {}
@@ -200,6 +181,16 @@ class OneCyclicLR(Callback):
         
         K.set_value(self.model.optimizer.lr, self.clr())
 
+def get_step_size(batch_size, ndata, epoch_per_step =6):
+    '''
+    epoch_per_step can be float
+    #one cycle is step_size *2 
+    '''
+    iteration_per_epoch = ndata/batch_size
+    step_size  = int(ndata/batch_size * epoch_per_step) #epoch_per_step could be float
+    
+    return int(step_size)
+
 def test_OneCyclicLR():
     from keras.optimizers import Nadam
     from keras.models import Sequential, Model
@@ -219,17 +210,34 @@ def test_OneCyclicLR():
     Y = np.random.randint(0,2,size=200000)
 
     
-    clr_triangular1= OneCyclicLR(settle_lr= 0.00001, scale_mode='cycle',step_size = 2000)
-
-    step_size = 2000; ndata = len(Y); batch_size = 200
-    epoch_per_cycle = step_size *2 / (ndata/batch_size ) #4
-    print('epoch_per_cycle', epoch_per_cycle)
-    #use epochs =  epoch_per_cycle + 1 
+    #clr_triangular1= OneCyclicLR(settle_lr= 0.00001, scale_mode='cycle',step_size = 2000)
     
+    if 1==2:
+        #1) give step size as argument
+        clr_triangular1= OneCyclicLR(base_lr=0.00001, max_lr=0.00006, settle_lr = 0.0000001,
+                    step_size=2000., step_max = 0, step_settle = 400 )
+        step_size = 2000; ndata = len(Y); batch_size = 200
+        epoch_per_cycle = step_size *2 / (ndata/batch_size ) #4
+        print('epoch_per_cycle', epoch_per_cycle)
+
+    if 1==2:
+        #2) given total number of epochs get step size
+        epochs = 4
+        step_size = get_step_size(batch_size, ndata, epoch_per_step = epochs/2.)
+        clr_triangular1= OneCyclicLR(base_lr=0.00001, max_lr=0.00006, settle_lr = 0.0000001,
+                    step_size=step_size, step_max = 0, step_settle = int(step_size*0.1) )
+    
+
+    if 1==1:
+        #3) use epoch as base
+        step_per_epoch = len(Y)/batch_size
+        clr_triangular1= OneCyclicLR(base_lr=0.00001, max_lr=0.00006, settle_lr = 0.0000001,
+                    step_size=step_per_epoch*2, step_max = step_per_epoch*1,
+                    step_down = step_per_epoch*4.5, step_settle = step_per_epoch*0.5 )
+                
+                
     model.compile(optimizer=Nadam(), loss='binary_crossentropy', metrics=['accuracy'])
-
-    
-    model.fit(X, Y, batch_size=200, epochs= 5 , callbacks=[clr_triangular1], verbose=0)
+    model.fit(X, Y, batch_size=200, epochs= 8 , callbacks=[clr_triangular1], verbose=0)
 
     plt.plot(clr_triangular1.history['iterations'], clr_triangular1.history['lr'])
     plt.title('lr vs iteration')
@@ -237,3 +245,7 @@ def test_OneCyclicLR():
     print(clr_triangular1.history['lr'][-10:])
     print('first 10 lr')
     print(clr_triangular1.history['lr'][0:10])
+
+    
+    
+    
